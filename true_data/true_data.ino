@@ -7,24 +7,33 @@
 #include "HT_SSD1306Wire.h" //display
 #include "MAX30105.h" //hr
 #include "heartRate.h" //hr
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 //display set-up
-#define SDA_OLED 4
+#define SDA_OLED 5 //(asta il modific cu 4)
 #define SCL_OLED 15
 #define RST_OLED 16
 SSD1306Wire  factory_display(0x3c, 400000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED);
 
-//define SDA and SLC for MAX30102 sensor
+//define SDA and SLC for the wire of the MAX30102 sensor
 #define SDA_HR 21
 #define SCL_HR 22
 
 //heart-rate sensor declaration
-MAX30105 particleSensor;
+MAX30105 hrSensor;
 int foundHR = 0;      //checks if a heart beat was found and can be sent
 long lastBeat = 0;    //time at which the last beat occurred
 float beatsPerMinute; //the bpm value
 
-// The MQTT topics that this device should publish/subscribe
+//define the pin where the DS18B20 sensor is connected
+#define TEMP_PIN 4 //(trebuie modificat dupa ce il mut)
+
+//temperature sensor declaration   
+OneWire oneWireTemp(TEMP_PIN);
+DallasTemperature tempSensor(&oneWireTemp);
+
+// MQTT topics used to publish/subscribe
 #define AWS_IOT_PUBLISH_TOPIC   "esp32/pub"
 #define AWS_IOT_SUBSCRIBE_TOPIC "esp32/sub"
 
@@ -48,7 +57,7 @@ void connectAWS(){
 
   while (WiFi.status() != WL_CONNECTED){
     delay(500);
-    Serial.print("nu.");
+    Serial.print("wifi.");
   }
 
   // Configure WiFiClientSecure to use the AWS IoT device credentials
@@ -86,50 +95,63 @@ void connectAWS(){
   client.subscribe(AWS_IOT_SUBSCRIBE_TOPIC);
 
   Serial.println("AWS IoT Connected!");
+
   factory_display.clear();
   factory_display.drawString(0, 0, "AWS IoT Connected!");
 	factory_display.display();
 }
 
 void heartRateSensorSetup(){
-   //initialize sensor
-  if (!particleSensor.begin(Wire1, I2C_SPEED_FAST)) //400kHz speed
+  //initialize sensor
+  if (!hrSensor.begin(Wire1, I2C_SPEED_FAST)) //400kHz speed
   {
-    Serial.println("MAX30105 was not found. Please check wiring/power.");
+    Serial.println("Something wrong with the MAX30102 sensor.");
     while (1);
   }
-  Serial.println("Place your index finger on the sensor with steady pressure.");
 
-  particleSensor.setup();                     //configure sensor with default settings
-  particleSensor.setPulseAmplitudeRed(0x0A);  //turn Red LED to low to indicate sensor is running
-  particleSensor.setPulseAmplitudeGreen(0);   //Turn off Green LED
+  //set up the heart rate sensor and turn on the red led
+  hrSensor.setup();
+  hrSensor.setPulseAmplitudeRed(0x0A);
+  hrSensor.setPulseAmplitudeGreen(0);
 }
 
-//get the heart rate value
+//function that retrieves the value of the temperature
+float getTemperature(){
+  //get the value of the temperature in Celsius
+  tempSensor.requestTemperatures();
+  float tempValue = tempSensor.getTempCByIndex(0);
+
+  Serial.print("Temp=");
+  Serial.println(tempValue);
+
+  return tempValue;
+}
+
+//function that retrieves the value of the heart rate
 int getHeartRate(){
   while(!foundHR){
-    long irValue = particleSensor.getIR();
+    long intensity = hrSensor.getIR();
 
-    if (checkForBeat(irValue) == true)
+    if (checkForBeat(intensity) == true)
     {
-      long delta = millis() - lastBeat;
+      long timePassed = millis() - lastBeat;
       lastBeat = millis();
 
-      beatsPerMinute = 60 / (delta / 1000.0);
+      beatsPerMinute = 60 / (timePassed / 1000.0);
 
-      if (beatsPerMinute < 255 && beatsPerMinute > 20)
+      if (beatsPerMinute > 20 && beatsPerMinute < 255)
       {
         foundHR=1;
         return beatsPerMinute;
       }
     }
 
-    // Serial.print("IR=");
-    // Serial.print(irValue);
-    // Serial.print(", BPM=");
-    // Serial.print(beatsPerMinute);
+     Serial.print("IR=");
+     Serial.print(intensity);
+     Serial.print(", BPM=");
+     Serial.print(beatsPerMinute);
 
-    if (irValue < 50000)
+    if (intensity < 50000)
       Serial.print(" No finger?");
 
     Serial.println(); 
@@ -141,17 +163,17 @@ void publishMessage()
 {
   StaticJsonDocument<200> doc;
   doc["time"] = millis();
-  doc["sensor_a0"] = analogRead(0);
+  doc["temperature"] = getTemperature();
   doc["heart_rate"] = getHeartRate();
   foundHR=0;
 
   char jsonBuffer[512];
 
   unsigned long time = doc["time"];
-  int sensor_a0 = doc["sensor_a0"];
+  float temperature = doc["temperature"];
   int heart_rate = doc["heart_rate"];
 
-  String printString = "Time: " + String(time) + "\n" + "Sensor Value: " + String(sensor_a0) + "\n" + "Heart Rate: "+ String(heart_rate);
+  String printString = "Time: " + String(time) + "\n" + "Temperature (ºC): " + String(temperature) + "\n" + "Heart Rate: "+ String(heart_rate);
 
   factory_display.clear();
   factory_display.drawString(0, 0, printString.c_str());
@@ -184,6 +206,8 @@ void setup() {
 
   Wire1.begin(SDA_HR,SCL_HR); //set upt the wire for the MAX30102 sensor
   heartRateSensorSetup();     //initialize the sensor
+
+  tempSensor.begin();         //set up temperature sensor
 
   factory_display.init();     //initialize the display
   logo();

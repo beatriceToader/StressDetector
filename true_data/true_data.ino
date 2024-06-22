@@ -4,49 +4,60 @@
 #include <ArduinoJson.h>
 #include "WiFi.h"
 #include <Wire.h>  
-#include "HT_SSD1306Wire.h" //display
-#include "MAX30105.h" //hr
-#include "heartRate.h" //hr
+#include "HT_SSD1306Wire.h"
+#include "MAX30105.h"
+#include "heartRate.h"
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
-//display set-up
-#define SDA_OLED 5 //(asta il modific cu 4)
+//declare the pins used for the display
+#define SDA_OLED 4 
 #define SCL_OLED 15
 #define RST_OLED 16
+//define the OLED display object
 SSD1306Wire  factory_display(0x3c, 400000, SDA_OLED, SCL_OLED, GEOMETRY_128_64, RST_OLED);
 
-//define SDA and SLC for the wire of the MAX30102 sensor
+//declare the pins for the EDA analog readings and the circuit's parameters
+#define EDA_PIN 34
+#define ADC_REF_VOLTAGE 5
+#define SERIES_RESISTOR 100000.0
+
+//declare SDA and SLC pins used for the MAX30102 sensor
 #define SDA_HR 21
 #define SCL_HR 22
 
 //heart-rate sensor declaration
 MAX30105 hrSensor;
-int foundHR = 0;      //checks if a heart beat was found and can be sent
-long lastBeat = 0;    //time at which the last beat occurred
-float beatsPerMinute; //the bpm value
+int foundHR = 0;      //variable that checks if a heart beat was found and can be sent
+long lastBeat = 0;    //variable used to store the time at which the last beat occurred
+float beatsPerMinute; //variable used to store the bpm value
 
-//define the pin where the DS18B20 sensor is connected
-#define TEMP_PIN 4 //(trebuie modificat dupa ce il mut)
+//declare the pin where the data line of the DS18B20 sensor is connected
+#define TEMP_PIN 17 
 
 //temperature sensor declaration   
 OneWire oneWireTemp(TEMP_PIN);
 DallasTemperature tempSensor(&oneWireTemp);
 
-// MQTT topics used to publish/subscribe
+//declare the MQTT topics used to publish/subscribe
 #define AWS_IOT_PUBLISH_TOPIC   "esp32/pub"
 #define AWS_IOT_SUBSCRIBE_TOPIC "esp32/sub"
 
+//declare the MQTT client
 WiFiClientSecure net = WiFiClientSecure();
 MQTTClient client = MQTTClient(256);
 
+//function to display the logo of the project
 void logo(){
 	factory_display.clear();
   factory_display.drawString(15, 15, "STRESS\nDETECTOR");
 	factory_display.display();
 }
 
+//function used to connect the ESP32 to Wifi and to AWS
 void connectAWS(){
+
+  //connect to wifi
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
@@ -60,15 +71,15 @@ void connectAWS(){
     Serial.print("wifi.");
   }
 
-  // Configure WiFiClientSecure to use the AWS IoT device credentials
+  //configure the connection using the AWS IoT device credentials 
   net.setCACert(AWS_CERT_CA);
   net.setCertificate(AWS_CERT_CRT);
   net.setPrivateKey(AWS_CERT_PRIVATE);
 
-  // Connect to the MQTT broker on the AWS endpoint we defined earlier
+  //connect the device to AWS 
   client.begin(AWS_IOT_ENDPOINT, 8883, net);
 
-  // Create a message handler
+  //create the messageHandler for the messages received from AWS
   client.onMessage(messageHandler);
 
   Serial.print("Connecting to AWS IOT");
@@ -85,13 +96,13 @@ void connectAWS(){
   if(!client.connected()){
     Serial.println("AWS IoT Timeout!");
 
-  factory_display.clear();
-  factory_display.drawString(0, 0, "Connecting to AWS IOT");
-	factory_display.display();
+    factory_display.clear();
+    factory_display.drawString(0, 0, "Connecting to AWS IOT");
+	  factory_display.display();
     return;
   }
 
-  // Subscribe to a topic
+  //subcribe to the topic that is used to send data from AWS to the ESP32
   client.subscribe(AWS_IOT_SUBSCRIBE_TOPIC);
 
   Serial.println("AWS IoT Connected!");
@@ -101,6 +112,7 @@ void connectAWS(){
 	factory_display.display();
 }
 
+//function used to do the setup for the MAX30102 sensor
 void heartRateSensorSetup(){
   //initialize sensor
   if (!hrSensor.begin(Wire1, I2C_SPEED_FAST)) //400kHz speed
@@ -115,28 +127,29 @@ void heartRateSensorSetup(){
   hrSensor.setPulseAmplitudeGreen(0);
 }
 
-//function that retrieves the value of the temperature
+//function that retrieves the temperature value
 float getTemperature(){
   //get the value of the temperature in Celsius
   tempSensor.requestTemperatures();
   float tempValue = tempSensor.getTempCByIndex(0);
-
-  Serial.print("Temp=");
-  Serial.println(tempValue);
 
   return tempValue;
 }
 
 //function that retrieves the value of the heart rate
 int getHeartRate(){
-  while(!foundHR){
+  //loop that goes until a new value for the heart rate is found or for 5 seconds 
+  while(!foundHR && (millis() - lastBeat < 5000)){
+    //get the ir value
     long intensity = hrSensor.getIR();
 
+    //check for a new heart beat
     if (checkForBeat(intensity) == true)
     {
       long timePassed = millis() - lastBeat;
       lastBeat = millis();
 
+      //compute a new value for the heart rate
       beatsPerMinute = 60 / (timePassed / 1000.0);
 
       if (beatsPerMinute > 20 && beatsPerMinute < 255)
@@ -146,40 +159,47 @@ int getHeartRate(){
       }
     }
 
-     Serial.print("IR=");
-     Serial.print(intensity);
-     Serial.print(", BPM=");
-     Serial.print(beatsPerMinute);
-
-    if (intensity < 50000)
-      Serial.print(" No finger?");
-
-    Serial.println(); 
-    client.loop();  //make sure you don't lose the aws connection
+    //make sure you don't lose the aws connection
+    client.loop();
   }
 }
 
+//function that returns the skin conductance value
+float getEDA(){
+  //read the digital value from the ADC pin
+  int potValue = analogRead(EDA_PIN);
+
+  //compute the voltage measured in the point of the ADC pin
+  float voltage = (potValue / 4095.0) * ADC_REF_VOLTAGE;
+
+  //compute the corresponding value for the skin condunctance
+  float conductance = voltage / SERIES_RESISTOR;
+
+  //turn the conductance value in micro-siemens
+  float edaValue = conductance * 1000000.0;
+
+  return edaValue;
+}
+
+//function used to publish new data extracted from the sensors on the AWS IoT Core
 void publishMessage()
 {
+  //get the data from the sensors
   StaticJsonDocument<200> doc;
-  doc["time"] = millis();
-  doc["temperature"] = getTemperature();
+  doc["eda"] = getEDA();
   doc["heart_rate"] = getHeartRate();
+  doc["temperature"] = getTemperature();
   foundHR=0;
 
+  //transform the data to obtain the required format for the AWS IoT Core
   char jsonBuffer[512];
-
-  unsigned long time = doc["time"];
-  float temperature = doc["temperature"];
-  int heart_rate = doc["heart_rate"];
-
-  String printString = "Time: " + String(time) + "\n" + "Temperature (ºC): " + String(temperature) + "\n" + "Heart Rate: "+ String(heart_rate);
-
-  factory_display.clear();
-  factory_display.drawString(0, 0, printString.c_str());
-  factory_display.display();
-
   serializeJson(doc, jsonBuffer);
+  StaticJsonDocument<300> AWSdoc;
+  AWSdoc["body"] = jsonBuffer;
+  char AWSjsonBuffer[512];
+  serializeJson(AWSdoc, AWSjsonBuffer);
+
+  //publish the data on the topic that is used to send data from the ESP32 to AWS 
   if(client.publish(AWS_IOT_PUBLISH_TOPIC, jsonBuffer)){
     Serial.println("Success");
   }
@@ -188,35 +208,91 @@ void publishMessage()
   }
 }
 
+//variable to keep track of the time passed between predictions
+float lastMess = 0;
+
+//function that is used when messages arrive from AWS
 void messageHandler(String &topic, String &payload) {
-  Serial.println("incoming: " + topic + " - " + payload);
-
+  //deserialize the incoming message to the doc 
   StaticJsonDocument<200> doc;
-  deserializeJson(doc, payload);
-  const char* message = doc["message"];
+  DeserializationError error = deserializeJson(doc, payload);
 
-  factory_display.clear();
-  factory_display.drawString(0, 0, message);
-	factory_display.display();
+  if (error) {
+    Serial.println("Failed to parse JSON payload");
+    return;
+  }
+
+  //check if the message has the stressLevel field
+  if(doc.containsKey("stressLevel")){
+
+    //compute the time passed from the last prediction
+    float delayMess = millis() - lastMess;
+    lastMess = millis();
+    float delay = delayMess/1000.0;
+
+    Serial.println("incoming: " + topic + " - " + payload);
+    Serial.println("Message arrived after: " + String(delay) + " seconds");
+
+    int stressLevel = doc["stressLevel"];
+
+    String stressMessage;
+    if(stressLevel==0){
+      stressMessage = "No Stress";
+    }
+    else if(stressLevel==1){
+      stressMessage = "Low Stress";
+    }
+    else if(stressLevel==2){
+      stressMessage = "High Stress";
+    }
+
+    //print the progress bar according with the stressLevel value
+    int progressBar = map(stressLevel, 0, 2, 0, 100);
+
+    //diplay the level of stress
+    factory_display.clear();
+    factory_display.drawString(0, 0, stressMessage);
+    factory_display.drawProgressBar(0, 10, 120, 10, progressBar);
+    factory_display.display();
+  }
+  else{
+    //display the notification message
+    Serial.println("incoming: " + topic + " - " + payload);
+
+    String message = doc["message"];
+
+    factory_display.clear();
+    factory_display.drawString(0, 0, message);
+    factory_display.display();
+    delay(5000);
+  }
 }
 
 void setup() {
   Serial.begin(115200);
   delay(10);
 
-  Wire1.begin(SDA_HR,SCL_HR); //set upt the wire for the MAX30102 sensor
-  heartRateSensorSetup();     //initialize the sensor
+  //initialize the I2C communication for the MAX30102 sensor
+  Wire1.begin(SDA_HR,SCL_HR); 
+  heartRateSensorSetup();
 
-  tempSensor.begin();         //set up temperature sensor
+  //initialize the temperature sensor
+  tempSensor.begin();
 
-  factory_display.init();     //initialize the display
-  logo();
+  //initialize the display
+  factory_display.init();
+
+  //display the logo
+  logo();      
 
 	delay(300);
 	factory_display.clear();
+
+  //connect the ESP32 to AWS
   connectAWS();
 }
 
+//publish new sensor data and keep the AWS connection
 void loop() {
   publishMessage();
   client.loop();
